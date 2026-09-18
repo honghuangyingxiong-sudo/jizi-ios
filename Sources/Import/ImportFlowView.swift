@@ -221,9 +221,9 @@ struct ImportFlowView: View {
                 }
             } else {
                 HStack {
-                    Stepper("列数 \(gridColumns)", value: $gridColumns, in: 1...20) { resegment() }
+                    Stepper("列数 \(gridColumns)", value: $gridColumns, in: 1...20) { _ in resegment() }
                     Spacer()
-                    Stepper("每列 \(gridRows) 字", value: $gridRows, in: 1...30) { resegment() }
+                    Stepper("每列 \(gridRows) 字", value: $gridRows, in: 1...30) { _ in resegment() }
                 }
                 .font(.footnote)
             }

@@ -4,8 +4,12 @@
   用法：
     powershell -ExecutionPolicy Bypass -File scripts\push-to-github.ps1 -User 你的用户名 -Token ghp_xxxxxxxx
 
-  Token 去哪弄：https://github.com/settings/tokens -> Tokens (classic) -> Generate new token (classic)
-    勾 repo 和 workflow 两项即可。有效期设 7 天。
+  Token 去哪弄：https://github.com/settings/personal-access-tokens
+    需要这几项 Repository permissions（细粒度 token）：
+      Contents       Read and write   推源码
+      Workflows      Read and write   推 .github/workflows/ 下的文件（少这项会被 GitHub 拒绝）
+      Actions        Read and write   查编译状态、下载产物
+      Administration Read and write   自动建仓库（不想给就自己在网页上先建空仓库）
 #>
 [CmdletBinding()]
 param(
@@ -18,14 +22,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$env:GIT_TERMINAL_PROMPT = "0"
+$env:GCM_INTERACTIVE = "never"
 
-# PS 5.1 默认的 TLS 1.0 会被 GitHub 直接拒掉
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
-# --- 找 git ---
+# ---------- 找 git ----------
 $git = "git"
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $candidates = @(
@@ -36,10 +41,23 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($found) { $git = $found } else { throw "找不到 git，先装 Git for Windows 再重开一个终端。" }
 }
-Say ("git = " + $git)
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+
+# ---------- git 助手 ----------
+# 参数不能叫 $Args —— 那是 PowerShell 的自动变量，会让 @Args 展开成空，
+# 结果 git 收到空参数、打印一堆帮助文档。（踩过的坑）
+function Invoke-Git {
+    param([string[]]$GitArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $out = & $git @GitArgs 2>&1
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    foreach ($line in $out) { Warn ($line -replace [regex]::Escape($Token), "<TOKEN>") }
+    return $code
+}
 
 $headers = @{
     Authorization          = "Bearer $Token"
@@ -50,9 +68,7 @@ $headers = @{
 
 function Api {
     param([string]$Uri, [string]$Method = "GET", $Body = $null)
-    if ($Body) {
-        return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $headers -Body $Body -ContentType "application/json"
-    }
+    if ($Body) { return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $headers -Body $Body -ContentType "application/json" }
     return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $headers
 }
 
@@ -60,7 +76,7 @@ function Api {
 Say "验证 token"
 $me = Api "https://api.github.com/user"
 if ($me.login -ne $User) {
-    Warn ("注意：token 属于 '" + $me.login + "'，你填的是 '" + $User + "'，按 token 的归属继续。")
+    Warn ("token 属于 '" + $me.login + "'，按它的归属继续。")
     $User = $me.login
 }
 
@@ -74,30 +90,13 @@ if ($repoExists) {
 else {
     Say "创建仓库 $User/$Repo"
     $body = @{ name = $Repo; private = $false; auto_init = $false } | ConvertTo-Json -Compress
-    try {
-        Api "https://api.github.com/user/repos" "POST" $body | Out-Null
-    }
-    catch {
-        throw ("建仓库失败：" + $_.Exception.Message + " —— 多半是 token 少了建仓库的权限，或者自己在网页上先建一个空的 " + $Repo + " 仓库再来。")
-    }
+    try { Api "https://api.github.com/user/repos" "POST" $body | Out-Null }
+    catch { throw ("建仓库失败：" + $_.Exception.Message + " —— 给 token 加 Administration 权限，或自己在网页上先建一个空的 " + $Repo + " 仓库。") }
     Start-Sleep -Seconds 3
 }
 
 # ---------- 2. 推源码 ----------
 Say "提交并推送"
-
-# PS 5.1 里 $ErrorActionPreference='Stop' 会把 git 写到 stderr 的任何东西
-# （包括无害的 "No such remote"）变成终止性错误，所以原生命令一律单独跑并查退出码。
-function Invoke-Git {
-    param([string[]]$Args)
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $out = & $git @Args 2>&1
-    $code = $LASTEXITCODE
-    $ErrorActionPreference = $prev
-    foreach ($line in $out) { Warn $line }
-    return $code
-}
 
 if (-not (Test-Path ".git")) {
     [void](Invoke-Git @("init"))
@@ -106,24 +105,17 @@ if (-not (Test-Path ".git")) {
 
 [void](Invoke-Git @("add", "-A"))
 [void](Invoke-Git @("-c", "user.name=$User", "-c", "user.email=$User@users.noreply.github.com",
-                   "commit", "-m", "JiZi 1.0.0"))
+                   "commit", "-m", ("JiZi build " + (Get-Date -Format "yyyy-MM-dd HH:mm"))))
 
-$remoteUrl = "https://github.com/$User/$Repo.git"
-$remoteList = ""
-$prevEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-$remoteList = & $git remote 2>&1
-$ErrorActionPreference = $prevEap
+# 凭据放 URL 里 + 关掉凭据助手。
+# 走 http.extraheader 的话细粒度 PAT 会拿到 401，然后 git 去叫 Git Credential Manager 弹窗，
+# 没有交互界面就无限期挂住。（也踩过）
+$pushUrl = "https://x-access-token:$Token@github.com/$User/$Repo.git"
+$pushCode = Invoke-Git @("-c", "credential.helper=", "push", "-u", $pushUrl, $Branch, "--force")
 
-if ($remoteList -contains "origin") {
-    [void](Invoke-Git @("remote", "set-url", "origin", $remoteUrl))
+if ($pushCode -ne 0) {
+    throw "push 失败（退出码 $pushCode）。最常见原因：token 少了 Workflows 权限，而仓库里有 .github/workflows/ 下的文件。"
 }
-else {
-    [void](Invoke-Git @("remote", "add", "origin", $remoteUrl))
-}
-
-$pushCode = Invoke-Git @("push", "-u", "origin", $Branch, "--force")
-if ($pushCode -ne 0) { throw "push 失败（退出码 $pushCode），检查 token 的 Contents 权限。" }
 
 $actionsUrl = "https://github.com/$User/$Repo/actions"
 if ($SkipWait) { Say "已推送，编译看这里：$actionsUrl"; return }
@@ -134,9 +126,7 @@ $runId = $null
 $conclusion = $null
 for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Seconds 10
-    try {
-        $runs = Api "https://api.github.com/repos/$User/$Repo/actions/runs?branch=$Branch&per_page=1"
-    }
+    try { $runs = Api "https://api.github.com/repos/$User/$Repo/actions/runs?branch=$Branch&per_page=1" }
     catch { Warn "查询失败，重试 ..."; continue }
 
     if ($runs.total_count -gt 0) {
@@ -144,9 +134,7 @@ for ($i = 0; $i -lt 120; $i++) {
         if ($r.status -eq "completed") { $runId = $r.id; $conclusion = $r.conclusion; break }
         Warn ("状态：" + $r.status)
     }
-    else {
-        Warn "还没排上队 ..."
-    }
+    else { Warn "还没排上队 ..." }
 }
 
 if (-not $runId) { Say "等超时了，自己去网页看：$actionsUrl"; return }
@@ -163,7 +151,7 @@ if ($conclusion -ne "success") {
 Say "编译成功，下载产物"
 $arts = Api "https://api.github.com/repos/$User/$Repo/actions/runs/$runId/artifacts"
 if ($arts.total_count -eq 0) {
-    Say "没找到 artifact，去网页看看：https://github.com/$User/$Repo/actions/runs/$runId"
+    Say "没找到 artifact：https://github.com/$User/$Repo/actions/runs/$runId"
     return
 }
 
@@ -172,18 +160,16 @@ $out = Join-Path $root "ipa-out"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 
-# artifact 会 302 到签名地址。签名地址不需要 token，但跟着跳转会把认证头丢掉，所以手动跟一次。
 $url = $arts.artifacts[0].archive_download_url
 $req = [System.Net.HttpWebRequest]::Create($url)
 $req.Method = "GET"
-$req.UserAgent = "jizi-build"                      # User-Agent 是受限头，必须走属性
-$req.Headers.Add("Authorization", "Bearer $Token") # Authorization 可以走 Headers
+$req.UserAgent = "jizi-build"
+$req.Headers.Add("Authorization", "Bearer $Token")
 $req.AllowAutoRedirect = $false
 
 $resp = $null
 try { $resp = $req.GetResponse() }
 catch [System.Net.WebException] { $resp = $_.Exception.Response }
-
 if ($null -eq $resp) { throw "下载 artifact 失败：拿不到响应。" }
 
 $loc = $resp.Headers["Location"]
@@ -208,7 +194,6 @@ if ($ipa) {
     Warn ("大小：" + [math]::Round((Get-Item $target).Length / 1MB, 2) + " MB")
     Write-Host ""
     Write-Host "下一步：用 Sideloadly 把这个 IPA 签上你自己的 Apple ID 装进手机。" -ForegroundColor Green
-    Write-Host "（免费 Apple ID 签名 7 天有效，过期重签一次）" -ForegroundColor DarkGray
 }
 else {
     Say ("解压后没找到 .ipa，看看 " + $out + " 里有什么")

@@ -6,3 +6,7 @@ DerivedData/
 Payload/
 *.ipa
 *.xcarchive
+
+*.log
+*.bak
+

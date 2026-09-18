@@ -1,0 +1,11 @@
+﻿git.exe : To https://github.com/honghuangyingxiong-sudo/jizi-ios.git
+At line:9 char:2
++ (& $g -c credential.helper= push -u $url main --force) 2>&1 | Out-Fil ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (To https://gith...do/jizi-ios.git:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ ! [remote rejected] main -> main (refusing to allow a Personal Access Token to create or update workflow `.github/work
+flows/build-ipa.yml` without `workflow` scope)
+error: failed to push some refs to 'https://github.com/honghuangyingxiong-sudo/jizi-ios.git'
+EXIT=1

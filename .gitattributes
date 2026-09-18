@@ -1,0 +1,6 @@
+# 云端编译器是 macOS，行尾必须是 LF —— 否则 shell 脚本会以  结尾直接报错
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.ipa binary
+*.xcassets/** binary

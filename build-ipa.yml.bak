@@ -1,0 +1,83 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "GitHub 托管 runner 标签（新 SDK 用 macos-26 或更新的）"
+        required: false
+        default: "macos-15"
+        type: string
+      xcode:
+        description: "Xcode 版本号，如 27.0；留空 = 用镜像自带的最新版"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 看看这台 runner 有哪些 Xcode
+        run: ls /Applications | grep -i '^Xcode' || true
+
+      - name: 选 Xcode
+        run: |
+          set -euo pipefail
+          WANT="${{ inputs.xcode }}"
+          if [ -n "$WANT" ]; then
+            sudo xcode-select -s "/Applications/Xcode_${WANT}.app"
+          fi
+          xcodebuild -version
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+
+      - name: 装 XcodeGen
+        run: brew install xcodegen || brew upgrade xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project JiZi.xcodeproj \
+            -scheme JiZi \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build 2>&1 | tee build.log | tail -n 150
+
+      - name: 打包成 IPA
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/JiZi.app"
+          test -d "$APP"
+          rm -rf Payload JiZi.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry JiZi.ipa Payload
+          ls -lh JiZi.ipa
+          shasum -a 256 JiZi.ipa
+
+      - name: 失败时把报错捞出来
+        if: failure()
+        run: grep -n "error:" build.log | head -n 60 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JiZi-unsigned-ipa
+          path: JiZi.ipa
+          if-no-files-found: error
+          retention-days: 30
